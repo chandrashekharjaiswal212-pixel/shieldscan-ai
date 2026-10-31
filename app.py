@@ -10,34 +10,45 @@ from pypdf import PdfReader
 app = Flask(__name__)
 CORS(app)
 
-# Load trained model and vectorizer
 with open("model.pkl", "rb") as f:
     model = pickle.load(f)
 
 with open("vectorizer.pkl", "rb") as f:
     vectorizer = pickle.load(f)
 
-# Transactional / Bank Whitelist Checker
-def is_legit_transaction(text):
+# Official Transactional & Service SMS Whitelist Checker
+def is_legitimate_service_sms(text):
     text_lower = text.lower()
     
-    # 1. Bank debit/credit ke typical patterns
-    tx_keywords = [
+    # 1. Bank debit / credit patterns
+    bank_patterns = [
         r'\b(debited|credited|withdrawn|deposited)\b',
         r'\b(inr|rs\.?|bal|acct|a/c|ending)\b',
         r'\b(upi ref|ref no|rrn|txn id|transaction id)\b',
         r'\b(avl bal|avail bal|available balance)\b'
     ]
+    bank_matches = sum(1 for p in bank_patterns if re.search(p, text_lower))
     
-    matches = sum(1 for pattern in tx_keywords if re.search(pattern, text_lower))
+    # 2. LPG Utility / Gas Booking / Delivery Notification patterns
+    utility_patterns = [
+        r'\b(hpgas|indane|bharat gas|hpcl|iocl|bpcl)\b',
+        r'\b(bkng|booking|refill|cylinder|consumer|con\d+)\b',
+        r'\b(delivery otp|delivery code|order id)\b'
+    ]
+    utility_matches = sum(1 for p in utility_patterns if re.search(p, text_lower))
+
+    # 3. Phishing Indicators (External suspicious links ya scam domains)
+    has_suspicious_link = bool(re.search(r'(https?://|bit\.ly|tinyurl|\.apk|\.xyz|\.top|\.club)', text_lower))
+    has_urgency_threat = bool(re.search(r'\b(immediately|within \d+ hours?|account suspended|deactivated permanently)\b', text_lower))
     
-    # 2. Phishing link ya urgency check (agar link hai toh whitelist mat karo)
-    has_suspicious_link = bool(re.search(r'(https?://|bit\.ly|tinyurl|\.apk|\.xyz)', text_lower))
-    has_credential_trap = bool(re.search(r'\b(otp|password|pin|kyc update|block within)\b', text_lower))
-    
-    # Agar debit/credit ke 2 ya zyada keywords match ho rahe hain aur koi suspicious link ya OTP trap NAHI hai:
-    if matches >= 2 and not has_suspicious_link and not has_credential_trap:
+    # Check 1: Agar valid bank transaction hai aur koi suspicious link nahi hai
+    if bank_matches >= 2 and not has_suspicious_link:
         return True
+        
+    # Check 2: Agar verified gas/utility booking message hai aur threat link nahi hai
+    if utility_matches >= 2 and not has_suspicious_link and not has_urgency_threat:
+        return True
+
     return False
 
 @app.route("/")
@@ -52,17 +63,16 @@ def predict():
     if not message:
         return jsonify({"error": "Message is empty"}), 400
 
-    # Rule-Based Check Pehle: Kya yeh genuine bank transaction message hai?
-    if is_legit_transaction(message):
+    # Whitelist Check pehle karein
+    if is_legitimate_service_sms(message):
         return jsonify({
             "status": "success",
             "prediction": "ham",
             "is_spam": False,
-            "spam_probability": 1.5, # Safe transactional score
-            "note": "Verified Official Transactional SMS"
+            "spam_probability": 1.2,
+            "note": "Verified Official Transactional / Utility SMS"
         })
 
-    # Agar normal message hai toh ML Model se predict karein
     transformed_text = vectorizer.transform([message])
     prediction = model.predict(transformed_text)[0]
     
@@ -129,10 +139,9 @@ def bulk_predict():
         ham_count = 0
 
         for i, text in enumerate(messages):
-            # Check whitelist first
-            if is_legit_transaction(text):
+            if is_legitimate_service_sms(text):
                 is_spam = False
-                prob = 1.5
+                prob = 1.2
             else:
                 transformed = vectorizer.transform([text])
                 pred = model.predict(transformed)[0]
